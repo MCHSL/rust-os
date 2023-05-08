@@ -1,7 +1,7 @@
 use generic_once_cell::Lazy;
 use spin::Mutex;
 use volatile::Volatile;
-use x86_64::instructions::interrupts::without_interrupts;
+use x86_64::instructions::{interrupts::without_interrupts, port::Port};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,7 @@ impl Writer {
                 _ => self.write_byte(0xfe),
             }
         }
+        self.update_cursor();
     }
 
     fn step_back(&mut self) {
@@ -129,6 +130,26 @@ impl Writer {
         self.step_back();
         self.write_str(" ").expect("Failed to write to vga buffer");
         self.step_back();
+        self.update_cursor();
+    }
+
+    fn clear_screen(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row)
+        }
+    }
+
+    fn update_cursor(&self) {
+        let mut command: Port<u8> = Port::new(0x3D4);
+        let mut data: Port<u8> = Port::new(0x3D5);
+
+        let pos = (self.row_position * BUFFER_WIDTH) + self.column_position;
+        unsafe {
+            command.write(0x0F);
+            data.write((pos & 0xFF) as u8);
+            command.write(0x0E);
+            data.write(((pos >> 8) & 0xFF) as u8)
+        }
     }
 }
 
@@ -142,12 +163,14 @@ impl fmt::Write for Writer {
 }
 
 pub static WRITER: Lazy<Mutex<()>, Mutex<Writer>> = Lazy::new(|| {
-    Mutex::new(Writer {
+    let mut writer = Writer {
         row_position: 0,
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
-    })
+    };
+    writer.clear_screen();
+    Mutex::new(writer)
 });
 
 // pub static WRITER: Writer = Writer {

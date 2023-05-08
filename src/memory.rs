@@ -1,11 +1,27 @@
+use conquer_once::spin::OnceCell;
+use spin::Mutex;
 use x86_64::{
-    structures::paging::{FrameAllocator, Mapper, Page, PageTable, PhysFrame, Size4KiB},
+    structures::paging::{FrameAllocator, Mapper, Page, PageTable, PhysFrame, Size4KiB, Translate},
     PhysAddr, VirtAddr,
 };
 
 use x86_64::structures::paging::OffsetPageTable;
 
+static mut PHYSICAL_MEMORY_OFFSET: u64 = 0;
+pub static MAPPER: OnceCell<OffsetPageTable<'static>> = OnceCell::uninit();
+pub static FRAME_ALLOCATOR: OnceCell<Mutex<BootInfoFrameAllocator>> = OnceCell::uninit();
+
+pub fn phys_to_virt(addr: PhysAddr) -> VirtAddr {
+    VirtAddr::new(addr.as_u64() + unsafe { PHYSICAL_MEMORY_OFFSET })
+}
+
+pub fn virt_to_phys(addr: VirtAddr) -> Option<PhysAddr> {
+    let mapper = MAPPER.get().unwrap();
+    mapper.translate_addr(addr)
+}
+
 pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static> {
+    PHYSICAL_MEMORY_OFFSET = physical_memory_offset.as_u64();
     let level_4_table = active_level_4_table(physical_memory_offset);
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }

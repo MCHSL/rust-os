@@ -9,10 +9,13 @@
 
 extern crate alloc;
 
+pub mod acpi;
 pub mod allocator;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
+pub mod pci;
+pub mod rtl8139;
 pub mod serial;
 pub mod task;
 pub mod time;
@@ -20,8 +23,14 @@ pub mod vga_buffer;
 
 use core::panic::PanicInfo;
 
+use crate::acpi::read_acpi;
 #[cfg(test)]
-use bootloader::{entry_point, BootInfo};
+use bootloader::entry_point;
+use bootloader::BootInfo;
+use memory::{BootInfoFrameAllocator, FRAME_ALLOCATOR, MAPPER};
+use spin::Mutex;
+use task::keyboard;
+use x86_64::VirtAddr;
 
 #[cfg(test)]
 entry_point!(test_kernel_main);
@@ -58,8 +67,8 @@ pub fn test_panic_handler(info: &PanicInfo) -> ! {
 
 /// Entry point for `cargo test`
 #[cfg(test)]
-fn test_kernel_main(_boot_info: &'static BootInfo) -> ! {
-    init();
+fn test_kernel_main(boot_info: &'static BootInfo) -> ! {
+    init(boot_info);
     test_main();
     hlt_loop();
 }
@@ -86,11 +95,25 @@ pub fn exit_qemu(exit_code: QemuExitCode) {
     }
 }
 
-pub fn init() {
+pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
     interrupts::init_idt();
     time::set_pit_frequency_divider(time::PIT_DIVIDER as u16, 0);
     unsafe { interrupts::PICS.lock().initialize() };
+
+    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+    let mut mapper = unsafe { memory::init(phys_mem_offset) };
+    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
+
+    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+
+    MAPPER.init_once(|| mapper);
+    FRAME_ALLOCATOR.init_once(|| Mutex::new(frame_allocator));
+
+    //read_acpi();
+
+    keyboard::initialize_streams();
+
     x86_64::instructions::interrupts::enable();
 }
 

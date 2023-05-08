@@ -1,6 +1,7 @@
 use super::{Task, TaskId};
 use alloc::task::Wake;
 use alloc::{collections::BTreeMap, sync::Arc};
+use conquer_once::spin::OnceCell;
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
 
@@ -26,18 +27,25 @@ impl TaskSpawner {
     }
 }
 
+pub static TASK_SPAWNER: OnceCell<TaskSpawner> = OnceCell::uninit();
+
+pub fn spawn_task(task: Task) {
+    let spawner = TASK_SPAWNER.get().expect("Executor not created");
+    spawner.spawn(task);
+}
+
 impl Executor {
     pub fn new() -> Self {
+        let incoming_tasks = Arc::new(ArrayQueue::new(100));
+        TASK_SPAWNER.init_once(|| TaskSpawner::new(incoming_tasks.clone()));
         Executor {
             tasks: BTreeMap::new(),
             task_queue: Arc::new(ArrayQueue::new(100)),
             waker_cache: BTreeMap::new(),
-            incoming_tasks: Arc::new(ArrayQueue::new(100)),
+            incoming_tasks,
         }
     }
-}
 
-impl Executor {
     pub fn spawn(&mut self, task: Task) {
         let task_id = task.id;
         if self.tasks.insert(task.id, task).is_some() {

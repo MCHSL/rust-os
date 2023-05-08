@@ -3,6 +3,7 @@ use core::time::Duration;
 use alloc::{string::String, vec::Vec};
 use futures_util::StreamExt;
 use pc_keyboard::DecodedKey;
+use x86_64::instructions::port::Port;
 
 use crate::{backspace, print, println, time::sleep};
 
@@ -11,6 +12,7 @@ use super::{executor::TaskSpawner, keyboard::KeyStream};
 pub async fn shell(_spawner: TaskSpawner) {
     let mut stream = KeyStream::new();
     let mut buffer = String::new();
+
     loop {
         print!("# ");
         loop {
@@ -20,8 +22,10 @@ pub async fn shell(_spawner: TaskSpawner) {
                         if key == '\n' {
                             break;
                         } else if key == char::from(8) {
-                            backspace!();
-                            buffer.pop();
+                            if !buffer.is_empty() {
+                                backspace!();
+                                buffer.pop();
+                            }
                         } else {
                             buffer.push(key);
                             print!("{key}");

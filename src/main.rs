@@ -6,14 +6,18 @@
 
 extern crate alloc;
 
-use blog_os::println;
+use blog_os::acpi::read_acpi;
+use blog_os::memory::{FRAME_ALLOCATOR, MAPPER};
 use blog_os::{
     allocator,
     memory::{self, BootInfoFrameAllocator},
     task::{executor::Executor, keyboard, shell::shell, Task},
 };
+use blog_os::{pci, println, rtl8139};
 use bootloader::{entry_point, BootInfo};
+use conquer_once::spin::{Once, OnceCell};
 use core::panic::PanicInfo;
+use x86_64::structures::paging::OffsetPageTable;
 use x86_64::VirtAddr;
 
 entry_point!(kernel_main);
@@ -21,18 +25,13 @@ entry_point!(kernel_main);
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("Starting up");
 
-    blog_os::init(); // new
+    blog_os::init(boot_info); // new
 
-    let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
-    let mut mapper = unsafe { memory::init(phys_mem_offset) };
-    let mut frame_allocator = unsafe { BootInfoFrameAllocator::init(&boot_info.memory_map) };
-
-    allocator::init_heap(&mut mapper, &mut frame_allocator).expect("heap initialization failed");
+    pci::scan_devices();
+    rtl8139::init();
 
     #[cfg(test)]
     test_main();
-
-    keyboard::initialize_streams();
 
     let mut executor = Executor::new();
     let spawner = executor.spawner();

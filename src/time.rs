@@ -17,10 +17,11 @@ use x86_64::{
 use crate::{
     interrupts::{InterruptIndex, PICS},
     print, println,
+    task::{executor::TASK_SPAWNER, Task},
 };
 
 pub const PIT_FREQUENCY: f64 = 3_579_545.0 / 3.0; // 1_193_181.666 Hz
-pub const PIT_DIVIDER: usize = 1193;
+pub const PIT_DIVIDER: usize = 65535;
 pub const PIT_INTERVAL: f64 = (PIT_DIVIDER as f64) / PIT_FREQUENCY;
 
 static CLOCK: AtomicUsize = AtomicUsize::new(0);
@@ -34,20 +35,20 @@ pub fn time() -> f64 {
     CLOCK.load(Ordering::Relaxed) as f64 * PIT_INTERVAL
 }
 
-struct SleepsterInner {
+struct SleepInner {
     waker: AtomicWaker,
     wake_at: f64,
 }
 
 #[derive(Clone)]
-pub struct Sleepster {
-    _inner: Arc<SleepsterInner>,
+pub struct Sleep {
+    _inner: Arc<SleepInner>,
 }
 
-impl Sleepster {
+impl Sleep {
     fn new(wake_at: f64) -> Self {
         Self {
-            _inner: Arc::new(SleepsterInner {
+            _inner: Arc::new(SleepInner {
                 waker: AtomicWaker::new(),
                 wake_at,
             }),
@@ -55,7 +56,7 @@ impl Sleepster {
     }
 }
 
-impl Future for Sleepster {
+impl Future for Sleep {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let time = time();
@@ -68,19 +69,17 @@ impl Future for Sleepster {
     }
 }
 
-static SLEEPERS: Lazy<Mutex<()>, Mutex<Vec<Sleepster>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static SLEEPERS: Lazy<Mutex<()>, Mutex<Vec<Sleep>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
-pub fn sleep(duration: Duration) -> Sleepster {
+pub fn sleep(duration: Duration) -> Sleep {
     let start_time = time();
     let end_time = start_time + duration.as_secs_f64();
-    let sleepster = Sleepster::new(end_time);
+    let sleepster = Sleep::new(end_time);
     SLEEPERS.lock().push(sleepster.clone());
     sleepster
 }
 
-pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    CLOCK.fetch_add(1, Ordering::Relaxed);
-
+fn wake_sleepers() {
     let time = time();
     SLEEPERS.lock().retain(|sleeper| {
         if sleeper._inner.wake_at <= time {
@@ -90,6 +89,17 @@ pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptSta
             true
         }
     });
+}
+
+pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    CLOCK.fetch_add(1, Ordering::Relaxed);
+
+    wake_sleepers();
+
+    /*TASK_SPAWNER
+    .get()
+    .expect("TASK_SPAWNER not initialized")
+    .spawn(Task::new(wake_sleepers()));*/
 
     unsafe {
         PICS.lock()

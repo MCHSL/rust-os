@@ -44,12 +44,6 @@ impl ScancodeStream {
     }
 }
 
-impl Default for ScancodeStream {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Stream for ScancodeStream {
     type Item = u8;
 
@@ -127,12 +121,6 @@ impl KeyStream {
             id,
             _inner: arc_stream,
         }
-    }
-}
-
-impl Default for KeyStream {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
