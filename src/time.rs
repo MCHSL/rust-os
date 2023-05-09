@@ -35,6 +35,10 @@ pub fn time() -> f64 {
     CLOCK.load(Ordering::Relaxed) as f64 * PIT_INTERVAL
 }
 
+pub fn time_ms() -> i64 {
+    (time() * 1000.0) as i64
+}
+
 struct SleepInner {
     waker: AtomicWaker,
     wake_at: f64,

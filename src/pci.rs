@@ -27,17 +27,17 @@ impl Register {
 
 #[derive(Clone)]
 pub struct PciDevice {
-    bus: u8,
-    slot: u8,
-    function: u8,
+    pub bus: u8,
+    pub slot: u8,
+    pub function: u8,
 
-    vendor: u16,
-    id: u16,
+    pub vendor: u16,
+    pub id: u16,
 
-    revision: u8,
-    prog: u8,
-    class: u8,
-    subclass: u8,
+    pub revision: u8,
+    pub prog: u8,
+    pub class: u8,
+    pub subclass: u8,
 
     pub base_addresses: [u32; 6],
 }
@@ -81,6 +81,11 @@ impl PciDevice {
         command |= 0x4;
         let command = Register { inner: command };
         self.write(1, command);
+    }
+
+    pub fn io_base(&self) -> u16 {
+        self.enable_mastering();
+        (self.base_addresses[0] as u16) & 0xFFF0
     }
 }
 
