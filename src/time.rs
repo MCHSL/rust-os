@@ -21,7 +21,7 @@ use crate::{
 };
 
 pub const PIT_FREQUENCY: f64 = 3_579_545.0 / 3.0; // 1_193_181.666 Hz
-pub const PIT_DIVIDER: usize = 65535;
+pub const PIT_DIVIDER: usize = 1193;
 pub const PIT_INTERVAL: f64 = (PIT_DIVIDER as f64) / PIT_FREQUENCY;
 
 static CLOCK: AtomicUsize = AtomicUsize::new(0);
@@ -37,6 +37,10 @@ pub fn time() -> f64 {
 
 pub fn time_ms() -> i64 {
     (time() * 1000.0) as i64
+}
+
+pub fn time_us() -> i64 {
+    (time() * 1000000.0) as i64
 }
 
 struct SleepInner {
@@ -73,14 +77,41 @@ impl Future for Sleep {
     }
 }
 
+pub struct Yield {
+    polled: AtomicBool,
+}
+
+impl Future for Yield {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let polled = self.polled.load(Ordering::Relaxed);
+        if polled {
+            Poll::Ready(())
+        } else {
+            self.polled.store(true, Ordering::Relaxed);
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
 static SLEEPERS: Lazy<Mutex<()>, Mutex<Vec<Sleep>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 pub fn sleep(duration: Duration) -> Sleep {
     let start_time = time();
     let end_time = start_time + duration.as_secs_f64();
     let sleepster = Sleep::new(end_time);
-    SLEEPERS.lock().push(sleepster.clone());
+    interrupts::without_interrupts(|| {
+        SLEEPERS.lock().push(sleepster.clone());
+    });
+
     sleepster
+}
+
+pub fn yield_now() -> Yield {
+    Yield {
+        polled: AtomicBool::new(false),
+    }
 }
 
 fn wake_sleepers() {
@@ -98,6 +129,7 @@ fn wake_sleepers() {
 pub extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     CLOCK.fetch_add(1, Ordering::Relaxed);
 
+    //print!(".");
     wake_sleepers();
 
     /*TASK_SPAWNER

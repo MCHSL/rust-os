@@ -1,7 +1,17 @@
+use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::task::{self, Poll};
+use core::time::Duration;
+
 use alloc::vec;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use conquer_once::spin::OnceCell;
+use futures_util::task::AtomicWaker;
+use futures_util::Future;
 use smoltcp::iface::SocketHandle;
-use smoltcp::socket::{AnySocket, Socket};
+use smoltcp::socket::icmp::{BindError, Endpoint, RecvError};
+use smoltcp::socket::{icmp, AnySocket, Socket};
+use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr};
 use smoltcp::{
     iface::{Config, Interface, SocketSet},
     phy::{self, DeviceCapabilities},
@@ -11,6 +21,8 @@ use smoltcp::{
 use spin::Mutex;
 
 use crate::println;
+use crate::task::network::{notify_tx, RECEIVING_SOCKETS};
+use crate::time::{sleep, yield_now};
 use crate::{pci::PciDevice, time};
 
 use self::rtl8139::Rtl8139;
@@ -75,9 +87,9 @@ impl phy::Device for dyn EthernetDevice {
     }
 }
 
-static NET_IFACES: Mutex<Vec<Arc<Mutex<NetworkInterfaceInner>>>> = Mutex::new(Vec::new());
+pub static NET_IFACES: Mutex<Vec<Arc<Mutex<NetworkInterfaceInner>>>> = Mutex::new(Vec::new());
 
-pub fn add_interface<'a>(device: PciDevice) -> Option<NetworkInterface<'static>> {
+pub fn add_interface(device: PciDevice) -> Option<NetworkInterface> {
     if device.vendor == 0x10EC && device.id == 0x8139 {
         let mut device: Box<dyn EthernetDevice> = Box::new(Rtl8139::new(device.io_base()));
         let mut config = Config::new();
@@ -101,7 +113,6 @@ pub fn add_interface<'a>(device: PciDevice) -> Option<NetworkInterface<'static>>
             index,
             interface: iface,
             device,
-            sockets: SocketSet::new(vec![]),
         }));
 
         net_ifaces.push(iface_inner.clone());
@@ -111,7 +122,7 @@ pub fn add_interface<'a>(device: PciDevice) -> Option<NetworkInterface<'static>>
     }
 }
 
-pub fn get_interface<'a>(index: usize) -> Option<NetworkInterface<'static>> {
+pub fn get_interface(index: usize) -> Option<NetworkInterface> {
     NET_IFACES
         .lock()
         .get(index)
@@ -119,50 +130,138 @@ pub fn get_interface<'a>(index: usize) -> Option<NetworkInterface<'static>> {
         .map(NetworkInterface::from)
 }
 
-struct NetworkInterfaceInner<'a> {
+pub fn get_interfaces() -> Vec<NetworkInterface> {
+    NET_IFACES
+        .lock()
+        .iter()
+        .cloned()
+        .map(NetworkInterface::from)
+        .collect()
+}
+
+pub struct NetworkInterfaceInner {
     index: usize,
     interface: Interface,
     device: Box<dyn EthernetDevice>,
-    sockets: SocketSet<'a>,
 }
 
-pub struct NetworkInterface<'a> {
-    inner: Arc<Mutex<NetworkInterfaceInner<'a>>>,
+#[derive(Clone)]
+pub struct NetworkInterface {
+    inner: Arc<Mutex<NetworkInterfaceInner>>,
 }
 
-impl<'a> NetworkInterface<'a> {
-    pub fn poll(&mut self) -> bool {
+pub static SOCKETS: OnceCell<Mutex<SocketSet>> = OnceCell::uninit();
+
+impl NetworkInterface {
+    pub fn poll(&mut self /*, sockets: &mut SocketSet<'a>*/) -> bool {
+        //println!("ipoll");
         let NetworkInterfaceInner {
             interface,
             device,
-            sockets,
             index: _,
         } = &mut *self.inner.lock();
         let timestamp = Instant::from_secs(time::time() as i64);
-        interface.poll(timestamp, &mut **device, sockets)
+        let res = interface.poll(timestamp, &mut **device, &mut SOCKETS.get().unwrap().lock());
+        res
     }
 
     pub fn capabilities(&self) -> DeviceCapabilities {
         self.inner.lock().device.get_capabilities()
     }
+}
 
-    pub fn add_socket<S: AnySocket<'a>>(&mut self, socket: S) -> SocketHandle {
-        self.inner.lock().sockets.add(socket)
-    }
-
-    pub fn with_socket<T: AnySocket<'a>>(
-        &mut self,
-        handle: SocketHandle,
-        mut f: impl FnMut(&mut T),
-    ) {
-        let mut inner = self.inner.lock();
-        let s = inner.sockets.get_mut::<T>(handle);
-        f(s);
+impl From<Arc<Mutex<NetworkInterfaceInner>>> for NetworkInterface {
+    fn from(value: Arc<Mutex<NetworkInterfaceInner>>) -> Self {
+        Self { inner: value }
     }
 }
 
-impl<'a> From<Arc<Mutex<NetworkInterfaceInner<'a>>>> for NetworkInterface<'a> {
-    fn from(value: Arc<Mutex<NetworkInterfaceInner<'a>>>) -> Self {
-        Self { inner: value }
+pub struct SocketRecvWaiter {
+    inner: Arc<SocketRecvWaiterInner>,
+}
+
+pub struct SocketRecvWaiterInner {
+    pub ready: AtomicBool,
+    pub waker: AtomicWaker,
+}
+
+impl Future for SocketRecvWaiter {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
+        let ready = self.inner.ready.load(Ordering::Relaxed);
+        if ready {
+            return Poll::Ready(());
+        }
+
+        self.inner.waker.register(cx.waker());
+        Poll::Pending
+    }
+}
+pub struct IcmpSocket {
+    handle: SocketHandle,
+}
+
+pub fn wait_for_recv() -> SocketRecvWaiter {
+    let waiter = Arc::new(SocketRecvWaiterInner {
+        ready: AtomicBool::new(false),
+        waker: AtomicWaker::new(),
+    });
+    RECEIVING_SOCKETS.lock().push(waiter.clone());
+    SocketRecvWaiter { inner: waiter }
+}
+
+impl IcmpSocket {
+    pub fn new() -> Self {
+        let rx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 256]);
+        let tx_buffer = icmp::PacketBuffer::new(vec![icmp::PacketMetadata::EMPTY], vec![0; 256]);
+        let inner = icmp::Socket::new(rx_buffer, tx_buffer);
+        let handle = SOCKETS.get().unwrap().lock().add(inner);
+        Self { handle }
+    }
+
+    pub fn with_inner<R>(&mut self, f: impl FnOnce(&mut icmp::Socket) -> R) -> R {
+        let mut sockets = SOCKETS.get().unwrap().lock();
+        let socket = sockets.get_mut(self.handle);
+        let res = f(socket);
+        res
+    }
+
+    fn try_recv(&mut self) -> Option<Result<(Vec<u8>, IpAddress), RecvError>> {
+        self.with_inner(|s| {
+            if s.can_recv() {
+                Some(s.recv().map(|(data, addr)| (data.to_vec(), addr)))
+            } else {
+                None
+            }
+        })
+    }
+
+    pub async fn recv(&mut self) -> Result<(Vec<u8>, IpAddress), RecvError> {
+        loop {
+            let res = { self.try_recv() };
+            if let Some(res) = res {
+                return res;
+            }
+            wait_for_recv().await;
+        }
+    }
+
+    pub async fn send(&mut self, to: IpAddress, data: Icmpv4Repr<'_>) {
+        self.with_inner(|s| {
+            let buffer = s.send(data.buffer_len(), to).unwrap();
+            let mut icmp_packet = Icmpv4Packet::new_unchecked(buffer);
+            data.emit(&mut icmp_packet, &DeviceCapabilities::default().checksum);
+        });
+        notify_tx();
+    }
+
+    pub fn bind<T: Into<Endpoint>>(&mut self, endpoint: T) -> Result<(), BindError> {
+        self.with_inner(|s| s.bind(endpoint))
+    }
+}
+
+impl Drop for IcmpSocket {
+    fn drop(&mut self) {
+        SOCKETS.get().unwrap().lock().remove(self.handle);
     }
 }

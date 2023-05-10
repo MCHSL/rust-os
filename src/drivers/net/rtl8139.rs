@@ -1,15 +1,35 @@
 use core::{
     hint::spin_loop,
-    sync::atomic::{AtomicUsize, Ordering},
+    pin::Pin,
+    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
+    task::{Context, Poll},
 };
 
+use alloc::{sync::Arc, vec::Vec};
+use conquer_once::spin::OnceCell;
+use crossbeam_queue::ArrayQueue;
+use futures_util::{task::AtomicWaker, Future};
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     wire::{EthernetAddress, HardwareAddress},
 };
-use x86_64::instructions::{hlt, port::Port};
+use spin::Mutex;
+use x86_64::{
+    instructions::{
+        hlt,
+        interrupts::{self, without_interrupts},
+        port::Port,
+    },
+    structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
+};
 
-use crate::{allocator::PhysBuf, println};
+use crate::{
+    allocator::PhysBuf,
+    hlt_loop,
+    interrupts::{IDT, PICS},
+    pci, print, println,
+    task::network::notify_tx,
+};
 
 use super::EthernetDevice;
 
@@ -17,7 +37,7 @@ const RST: u8 = 1 << 4; // Reset
 const RE: u8 = 1 << 3; // Receiver enable
 const TE: u8 = 1 << 2; // Transmitter enable
 
-const ROK: u32 = 1 << 0; // Receive OK
+const ROK: u16 = 1 << 0; // Receive OK
 const BUFE: u8 = 1 << 0; // RX buffer empty
 
 const TOK: u32 = 1 << 15; // Transmit OK
@@ -45,6 +65,7 @@ pub struct Rtl8139 {
     command: Port<u8>,
     rx_buffer_port: Port<u32>,
     imr: Port<u16>,
+    isr: Port<u16>,
     tx_config: Port<u32>,
     rx_config: Port<u32>,
     capr: Port<u16>,
@@ -61,12 +82,14 @@ pub struct Rtl8139 {
 
 impl Rtl8139 {
     pub fn new(io_base: u16) -> Self {
+        RTL_IO_BASE.store(io_base, Ordering::Relaxed);
         let mut this = Self {
             io_base,
             config1: Port::new(io_base + 0x52),
             command: Port::new(io_base + 0x37),
             rx_buffer_port: Port::new(io_base + 0x30),
             imr: Port::new(io_base + 0x3C),
+            isr: Port::new(io_base + 0x3E),
             tx_config: Port::new(io_base + 0x40),
             rx_config: Port::new(io_base + 0x44),
             capr: Port::new(io_base + 0x38),
@@ -122,15 +145,102 @@ impl Rtl8139 {
 
             // Accept only Transmit OK and Receive OK interrupts
             self.imr.write(0x5);
+            //self.isr.write(0x5);
+
+            let irq_num = pci::get_device(0x10EC, 0x8139).unwrap().read(0xF).byte(0);
+            println!("IRQ: {irq_num}");
+            let mut idt = IDT.get().unwrap().lock();
+            idt[32 + irq_num as usize].set_handler_fn(rtl8139_handler);
 
             // Accept all packets and write them past the end of the receive buffer
             self.rx_config.write(AB | AM | APM | AAP | WRAP);
 
-            //self.tx_config.write(TCR_IFG | TCR_MXDMA1 | TCR_MXDMA2);
-
             // Enable TX and RX
             self.command.write(TE | RE);
         }
+    }
+}
+
+static RTL_IO_BASE: AtomicU16 = AtomicU16::new(0);
+pub static RX_WAKER: OnceCell<Arc<Rtl8139RecvInner>> = OnceCell::uninit();
+
+pub struct Rtl8139RecvInner {
+    ready: AtomicBool,
+    waker: AtomicWaker,
+}
+
+pub struct Rtl8139Recv {
+    inner: Arc<Rtl8139RecvInner>,
+}
+
+impl Future for Rtl8139Recv {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        without_interrupts(|| {
+            let ready = self.inner.ready.load(Ordering::Relaxed);
+
+            if ready {
+                self.inner.ready.store(false, Ordering::Relaxed);
+                Poll::Ready(())
+            } else {
+                self.inner.waker.register(cx.waker());
+                Poll::Pending
+            }
+        })
+    }
+}
+
+pub fn rtl_receive() -> Rtl8139Recv {
+    RX_WAKER.init_once(|| {
+        Arc::new(Rtl8139RecvInner {
+            ready: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        })
+    });
+    //without_interrupts(|| RTL_WAITERS.lock().push(waiter.clone()));
+    Rtl8139Recv {
+        inner: RX_WAKER.get().unwrap().clone(),
+    }
+}
+
+pub fn notify_rx() {
+    RX_WAKER.init_once(|| {
+        Arc::new(Rtl8139RecvInner {
+            ready: AtomicBool::new(false),
+            waker: AtomicWaker::new(),
+        })
+    });
+    without_interrupts(|| {
+        let waker = RX_WAKER.get().unwrap();
+        waker.ready.store(true, Ordering::Relaxed);
+        waker.waker.wake();
+    })
+}
+
+//static RTL_WAITERS: Mutex<Vec<Arc<Rtl8139RecvInner>>> = Mutex::new(Vec::new());
+
+extern "x86-interrupt" fn rtl8139_handler(stack_frame: InterruptStackFrame) {
+    let mut imr: Port<u16> = Port::new(RTL_IO_BASE.load(Ordering::Relaxed) + 0x3C);
+    let mut isr: Port<u16> = Port::new(RTL_IO_BASE.load(Ordering::Relaxed) + 0x3E);
+
+    let status = unsafe {
+        let s = isr.read();
+        isr.write(s);
+        s
+    };
+
+    if (status & ROK) == ROK {
+        notify_rx();
+    }
+
+    if (status & 0x4) == 0x4 {
+        //notify_tx();
+    }
+
+    //println!("interrupt complete");
+
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(43);
     }
 }
 
@@ -161,6 +271,7 @@ impl EthernetDevice for Rtl8139 {
     }
 
     fn transmit_packet(&mut self, len: usize) {
+        //println!("Transmit");
         unsafe {
             let len = len.max(60);
             let current_tx = self.current_tx_buffer.load(Ordering::SeqCst);
@@ -168,7 +279,9 @@ impl EthernetDevice for Rtl8139 {
 
             port.write(0x1FFF & len as u32);
             while port.read() & OWN != OWN {}
+            //println!("OWN complete");
             while port.read() & TOK != TOK {}
+            //println!("TOK complete");
         }
     }
 
@@ -181,8 +294,7 @@ impl EthernetDevice for Rtl8139 {
         let rx_offset = unsafe { self.rx_offset_port.read() };
         let capr = unsafe { self.capr.read() };
         let offset = ((capr as usize) + RX_BUFFER_PADDING) % (1 << 16);
-        let header =
-            u16::from_le_bytes(self.rx_buffer[offset..offset + 2].try_into().unwrap()) as u32;
+        let header = u16::from_le_bytes(self.rx_buffer[offset..offset + 2].try_into().unwrap());
         if header & ROK != ROK {
             unsafe {
                 self.capr

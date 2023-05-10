@@ -12,15 +12,15 @@ pub struct Register {
 }
 
 impl Register {
-    fn dword(&self) -> u32 {
+    pub fn dword(&self) -> u32 {
         self.inner
     }
 
-    fn word(&self, which: u8) -> u16 {
+    pub fn word(&self, which: u8) -> u16 {
         (self.inner >> (16 * which)) as u16
     }
 
-    fn byte(&self, which: u8) -> u8 {
+    pub fn byte(&self, which: u8) -> u8 {
         (self.inner >> (8 * which)) as u8
     }
 }
@@ -74,6 +74,10 @@ impl PciDevice {
 
     pub fn write(&self, register: u8, data: Register) {
         pci_write(self.bus, self.slot, self.function, register, data)
+    }
+
+    pub fn read(&self, register: u8) -> Register {
+        pci_read(self.bus, self.slot, self.function, register)
     }
 
     pub fn enable_mastering(&self) {

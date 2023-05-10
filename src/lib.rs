@@ -16,7 +16,6 @@ pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod pci;
-pub mod rtl8139;
 pub mod serial;
 pub mod task;
 pub mod time;
@@ -24,7 +23,6 @@ pub mod vga_buffer;
 
 use core::panic::PanicInfo;
 
-use crate::acpi::read_acpi;
 #[cfg(test)]
 use bootloader::entry_point;
 use bootloader::BootInfo;
@@ -100,7 +98,11 @@ pub fn init(boot_info: &'static BootInfo) {
     gdt::init();
     interrupts::init_idt();
     time::set_pit_frequency_divider(time::PIT_DIVIDER as u16, 0);
-    unsafe { interrupts::PICS.lock().initialize() };
+    unsafe {
+        let mut pics = interrupts::PICS.lock();
+        pics.initialize();
+        pics.write_masks(0, 0)
+    };
 
     let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
     let mut mapper = unsafe { memory::init(phys_mem_offset) };

@@ -1,5 +1,9 @@
+use core::borrow::BorrowMut;
+use core::cell::UnsafeCell;
+
 use crate::gdt;
 use crate::{hlt_loop, println};
+use conquer_once::spin::OnceCell;
 use generic_once_cell::Lazy;
 use pic8259::ChainedPics;
 use spin::Mutex;
@@ -8,7 +12,9 @@ use x86_64::{
     structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode},
 };
 
-static IDT: Lazy<Mutex<()>, InterruptDescriptorTable> = Lazy::new(|| {
+pub static IDT: OnceCell<Mutex<InterruptDescriptorTable>> = OnceCell::uninit();
+
+pub fn init_idt() {
     let mut idt = InterruptDescriptorTable::new();
     idt.breakpoint.set_handler_fn(breakpoint_handler);
     idt.page_fault.set_handler_fn(page_fault_handler);
@@ -22,11 +28,10 @@ static IDT: Lazy<Mutex<()>, InterruptDescriptorTable> = Lazy::new(|| {
     idt[InterruptIndex::Keyboard.as_usize()].set_handler_fn(keyboard_interrupt_handler);
     idt[InterruptIndex::RealTimeClock.as_usize()]
         .set_handler_fn(crate::time::rtc_interrupt_handler);
-    idt
-});
-
-pub fn init_idt() {
-    IDT.load();
+    IDT.init_once(|| Mutex::new(idt));
+    let idt = IDT.get().unwrap().lock();
+    let idt: &'static InterruptDescriptorTable = unsafe { core::mem::transmute(&*idt) };
+    idt.load();
 }
 
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {

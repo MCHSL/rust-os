@@ -18,6 +18,7 @@ linked_list_allocator = "0.10.5"
 acpi = "4.1.1"
 smoltcp = { version = "0.9.1", default-features = false, features = ["alloc", "socket-icmp", "proto-ipv4", "medium-ethernet"] }
 byteorder = { version = "1.4.3", default-features = false }
+futures = { version = "0.3.28", default-features = false }
 
 [package.metadata.bootimage]
 run-args = ["-netdev", "user,id=network0", "-device", "rtl8139,netdev=network0", "-object", "filter-dump,id=f1,netdev=network0,file=dump.dat"]

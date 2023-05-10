@@ -1,3 +1,5 @@
+use crate::println;
+
 use super::{Task, TaskId};
 use alloc::task::Wake;
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -74,6 +76,7 @@ impl Executor {
                 .entry(task_id)
                 .or_insert_with(|| TaskWaker::new(task_id, task_queue.clone()));
             let mut context = Context::from_waker(waker);
+            //println!("Executing task {:?}", task.id);
             match task.poll(&mut context) {
                 Poll::Ready(()) => {
                     // task done -> remove it and its cached waker
@@ -104,6 +107,7 @@ impl Executor {
 
         interrupts::disable();
         if self.task_queue.is_empty() {
+            //println!("nothing to do");
             enable_and_hlt();
         } else {
             interrupts::enable();
