@@ -49,6 +49,7 @@ pub fn init_heap(
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
+// https://github.com/vinc/moros/blob/trunk/src/sys/allocator.rs
 #[derive(Clone)]
 pub struct PhysBuf {
     pub buf: Arc<Mutex<Vec<u8>>>,
@@ -68,6 +69,7 @@ impl PhysBuf {
                 buf: Arc::new(Mutex::new(vec)),
             }
         } else {
+            #[allow(clippy::redundant_clone)]
             Self::from(vec.clone()) // Clone vec and try again
         }
     }

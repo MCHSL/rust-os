@@ -15,6 +15,7 @@ pub mod drivers;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
+pub mod networking;
 pub mod pci;
 pub mod serial;
 pub mod task;

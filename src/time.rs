@@ -17,7 +17,6 @@ use x86_64::{
 use crate::{
     interrupts::{InterruptIndex, PICS},
     print, println,
-    task::{executor::TASK_SPAWNER, Task},
 };
 
 pub const PIT_FREQUENCY: f64 = 3_579_545.0 / 3.0; // 1_193_181.666 Hz

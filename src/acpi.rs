@@ -1,16 +1,9 @@
-use core::{alloc::Layout, mem::size_of, ptr::NonNull};
+use core::ptr::NonNull;
 
 use acpi::{AcpiTables, InterruptModel};
-use x86_64::{
-    structures::paging::{FrameAllocator, Mapper, Page, PhysFrame, Size4KiB},
-    PhysAddr, VirtAddr,
-};
+use x86_64::PhysAddr;
 
-use crate::{
-    allocator::ALLOCATOR,
-    memory::{self, FRAME_ALLOCATOR, MAPPER},
-    println,
-};
+use crate::{memory, println};
 
 #[derive(Clone)]
 struct Handler;
@@ -31,7 +24,7 @@ impl acpi::AcpiHandler for Handler {
         )
     }
 
-    fn unmap_physical_region<T>(region: &acpi::PhysicalMapping<Self, T>) {}
+    fn unmap_physical_region<T>(_region: &acpi::PhysicalMapping<Self, T>) {}
 }
 
 pub fn read_acpi() {

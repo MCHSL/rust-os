@@ -1,37 +1,20 @@
 use core::{
     hint::spin_loop,
-    pin::Pin,
-    sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering},
-    task::{Context, Poll},
+    sync::atomic::{AtomicU16, AtomicUsize, Ordering},
 };
-
-use alloc::{sync::Arc, vec::Vec};
-use conquer_once::spin::OnceCell;
-use crossbeam_queue::ArrayQueue;
-use futures_util::{task::AtomicWaker, Future};
 use smoltcp::{
     phy::{DeviceCapabilities, Medium},
     wire::{EthernetAddress, HardwareAddress},
 };
-use spin::Mutex;
-use x86_64::{
-    instructions::{
-        hlt,
-        interrupts::{self, without_interrupts},
-        port::Port,
-    },
-    structures::idt::{InterruptDescriptorTable, InterruptStackFrame},
-};
+use x86_64::{instructions::port::Port, structures::idt::InterruptStackFrame};
 
 use crate::{
     allocator::PhysBuf,
-    hlt_loop,
     interrupts::{IDT, PICS},
-    pci, print, println,
-    task::network::notify_tx,
+    networking::EthernetDevice,
+    pci, println,
+    task::network::notify_rx,
 };
-
-use super::EthernetDevice;
 
 const RST: u8 = 1 << 4; // Reset
 const RE: u8 = 1 << 3; // Receiver enable
@@ -47,17 +30,17 @@ const AAP: u32 = 1 << 0; // Accept All Packets
 const APM: u32 = 1 << 1; // Accept Physical Match Packets
 const AM: u32 = 1 << 2; // Accept Multicast Packets
 const AB: u32 = 1 << 3; // Accept Broadcast Packets
-const AR: u32 = 1 << 4; // Accept Runt Packets
-const AER: u32 = 1 << 5; // Accept Error Packets
+const _AR: u32 = 1 << 4; // Accept Runt Packets
+const _AER: u32 = 1 << 5; // Accept Error Packets
 const WRAP: u32 = 1 << 7; // 1: Write past end of buffer
 
 const RX_BUFFER_WRAP_SPACE: usize = 1500;
 const RX_BUFFER_PADDING: usize = 16;
 const RX_BUFFER_LEN: usize = 8192 + RX_BUFFER_WRAP_SPACE + RX_BUFFER_PADDING;
 
-const TCR_IFG: u32 = 3 << 24;
-const TCR_MXDMA1: u32 = 1 << 9;
-const TCR_MXDMA2: u32 = 1 << 10;
+const _TCR_IFG: u32 = 3 << 24;
+const _TCR_MXDMA1: u32 = 1 << 9;
+const _TCR_MXDMA2: u32 = 1 << 10;
 
 pub struct Rtl8139 {
     io_base: u16,
@@ -65,8 +48,8 @@ pub struct Rtl8139 {
     command: Port<u8>,
     rx_buffer_port: Port<u32>,
     imr: Port<u16>,
-    isr: Port<u16>,
-    tx_config: Port<u32>,
+    _isr: Port<u16>,
+    _tx_config: Port<u32>,
     rx_config: Port<u32>,
     capr: Port<u16>,
     rx_offset_port: Port<u16>,
@@ -89,8 +72,8 @@ impl Rtl8139 {
             command: Port::new(io_base + 0x37),
             rx_buffer_port: Port::new(io_base + 0x30),
             imr: Port::new(io_base + 0x3C),
-            isr: Port::new(io_base + 0x3E),
-            tx_config: Port::new(io_base + 0x40),
+            _isr: Port::new(io_base + 0x3E),
+            _tx_config: Port::new(io_base + 0x40),
             rx_config: Port::new(io_base + 0x44),
             capr: Port::new(io_base + 0x38),
             rx_offset_port: Port::new(io_base + 0x3A),
@@ -162,65 +145,8 @@ impl Rtl8139 {
 }
 
 static RTL_IO_BASE: AtomicU16 = AtomicU16::new(0);
-pub static RX_WAKER: OnceCell<Arc<Rtl8139RecvInner>> = OnceCell::uninit();
 
-pub struct Rtl8139RecvInner {
-    ready: AtomicBool,
-    waker: AtomicWaker,
-}
-
-pub struct Rtl8139Recv {
-    inner: Arc<Rtl8139RecvInner>,
-}
-
-impl Future for Rtl8139Recv {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        without_interrupts(|| {
-            let ready = self.inner.ready.load(Ordering::Relaxed);
-
-            if ready {
-                self.inner.ready.store(false, Ordering::Relaxed);
-                Poll::Ready(())
-            } else {
-                self.inner.waker.register(cx.waker());
-                Poll::Pending
-            }
-        })
-    }
-}
-
-pub fn rtl_receive() -> Rtl8139Recv {
-    RX_WAKER.init_once(|| {
-        Arc::new(Rtl8139RecvInner {
-            ready: AtomicBool::new(false),
-            waker: AtomicWaker::new(),
-        })
-    });
-    //without_interrupts(|| RTL_WAITERS.lock().push(waiter.clone()));
-    Rtl8139Recv {
-        inner: RX_WAKER.get().unwrap().clone(),
-    }
-}
-
-pub fn notify_rx() {
-    RX_WAKER.init_once(|| {
-        Arc::new(Rtl8139RecvInner {
-            ready: AtomicBool::new(false),
-            waker: AtomicWaker::new(),
-        })
-    });
-    without_interrupts(|| {
-        let waker = RX_WAKER.get().unwrap();
-        waker.ready.store(true, Ordering::Relaxed);
-        waker.waker.wake();
-    })
-}
-
-//static RTL_WAITERS: Mutex<Vec<Arc<Rtl8139RecvInner>>> = Mutex::new(Vec::new());
-
-extern "x86-interrupt" fn rtl8139_handler(stack_frame: InterruptStackFrame) {
-    let mut imr: Port<u16> = Port::new(RTL_IO_BASE.load(Ordering::Relaxed) + 0x3C);
+extern "x86-interrupt" fn rtl8139_handler(_stack_frame: InterruptStackFrame) {
     let mut isr: Port<u16> = Port::new(RTL_IO_BASE.load(Ordering::Relaxed) + 0x3E);
 
     let status = unsafe {
@@ -237,8 +163,6 @@ extern "x86-interrupt" fn rtl8139_handler(stack_frame: InterruptStackFrame) {
         //notify_tx();
     }
 
-    //println!("interrupt complete");
-
     unsafe {
         PICS.lock().notify_end_of_interrupt(43);
     }
@@ -248,6 +172,7 @@ impl EthernetDevice for Rtl8139 {
     fn mac(&self) -> HardwareAddress {
         let mut result = [0; 6];
         unsafe {
+            #[allow(clippy::needless_range_loop)]
             for i in 0..6 {
                 let mut port: Port<u8> = Port::new(self.io_base + i as u16);
                 result[i] = port.read();

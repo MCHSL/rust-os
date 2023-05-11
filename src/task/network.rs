@@ -1,118 +1,106 @@
 use core::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
-    task::{self, Poll},
-    time::Duration,
+    task::{Context, Poll},
 };
 
 use alloc::{sync::Arc, vec::Vec};
 use conquer_once::spin::OnceCell;
 use futures_util::{future::select, task::AtomicWaker, Future};
 use spin::Mutex;
-use x86_64::instructions::{hlt, interrupts::without_interrupts};
+use x86_64::instructions::interrupts::without_interrupts;
 
-use crate::{
-    drivers::net::{get_interfaces, rtl8139::rtl_receive, SocketRecvWaiterInner, NET_IFACES},
-    println,
-    time::{sleep, yield_now},
-};
+use crate::networking::get_interfaces;
 
-pub static RECEIVING_SOCKETS: Mutex<Vec<Arc<SocketRecvWaiterInner>>> = Mutex::new(Vec::new());
+pub static RECEIVING_SOCKETS: Mutex<Vec<Arc<NotificationWaiterInner>>> = Mutex::new(Vec::new());
 
-pub static TX_WAKER: OnceCell<Arc<WaitForTxInner>> = OnceCell::uninit();
+pub static TX_WAKER: OnceCell<Arc<NotificationWaiterInner>> = OnceCell::uninit();
+pub static RX_WAKER: OnceCell<Arc<NotificationWaiterInner>> = OnceCell::uninit();
 
-pub struct WaitForTxInner {
+pub struct NotificationWaiterInner {
     ready: AtomicBool,
     waker: AtomicWaker,
 }
 
-impl WaitForTxInner {
-    const fn new() -> Self {
+impl NotificationWaiterInner {
+    pub fn new() -> Self {
         Self {
             ready: AtomicBool::new(false),
             waker: AtomicWaker::new(),
         }
     }
-}
 
-struct WaitForTx {
-    inner: Arc<WaitForTxInner>,
-}
-
-impl Future for WaitForTx {
-    type Output = ();
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {
-        let ready = self.inner.ready.load(Ordering::Relaxed);
-        if ready {
-            self.inner.ready.store(false, Ordering::Relaxed);
-            return Poll::Ready(());
-        }
-        self.inner.waker.register(cx.waker());
-        let ready = self.inner.ready.load(Ordering::Relaxed);
-        if ready {
-            self.inner.ready.store(false, Ordering::Relaxed);
-            return Poll::Ready(());
-        }
-        Poll::Pending
+    pub fn notify(&self) {
+        self.ready.store(true, Ordering::Relaxed);
+        self.waker.wake();
     }
 }
 
-fn wait_for_tx() -> WaitForTx {
+pub struct NotificationWaiter {
+    pub inner: Arc<NotificationWaiterInner>,
+}
+
+impl Future for NotificationWaiter {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        without_interrupts(|| {
+            let ready = self.inner.ready.load(Ordering::Relaxed);
+
+            if ready {
+                self.inner.ready.store(false, Ordering::Relaxed);
+                Poll::Ready(())
+            } else {
+                self.inner.waker.register(cx.waker());
+                Poll::Pending
+            }
+        })
+    }
+}
+
+fn wait_for_tx() -> NotificationWaiter {
     without_interrupts(|| {
-        TX_WAKER.init_once(|| Arc::new(WaitForTxInner::new()));
+        TX_WAKER.init_once(|| Arc::new(NotificationWaiterInner::new()));
         let waker = TX_WAKER.get().unwrap();
-        //waker.ready.store(false, Ordering::Relaxed);
-        WaitForTx {
+        NotificationWaiter {
+            inner: waker.clone(),
+        }
+    })
+}
+
+fn wait_for_rx() -> NotificationWaiter {
+    without_interrupts(|| {
+        RX_WAKER.init_once(|| Arc::new(NotificationWaiterInner::new()));
+        let waker = RX_WAKER.get().unwrap();
+        NotificationWaiter {
             inner: waker.clone(),
         }
     })
 }
 
 pub fn notify_tx() {
-    TX_WAKER.init_once(|| Arc::new(WaitForTxInner::new()));
-    let tx = TX_WAKER.get().unwrap();
-    tx.ready.store(true, Ordering::Relaxed);
-    tx.waker.wake();
+    TX_WAKER.init_once(|| Arc::new(NotificationWaiterInner::new()));
+    TX_WAKER.get().unwrap().notify();
 }
 
-pub fn pump_interfaces() -> bool {
-    let mut ifaces = get_interfaces();
-    let mut changed = false;
-    for iface in ifaces.iter_mut() {
-        without_interrupts(|| {
-            changed = changed || iface.poll();
-        })
-    }
-    changed
+pub fn notify_rx() {
+    RX_WAKER.init_once(|| Arc::new(NotificationWaiterInner::new()));
+    RX_WAKER.get().unwrap().notify();
 }
 
-pub async fn keep_pumping_interfaces() {
-    let mut ifaces = get_interfaces();
-
+pub async fn pump_interfaces() {
     loop {
-        //let mut rx = None;
-        //let mut tx = None;
-        //without_interrupts(|| {
+        let mut ifaces = get_interfaces();
         let mut changed = false;
         for iface in ifaces.iter_mut() {
             changed = changed || iface.poll();
         }
 
-        //println!("Poll result: {changed}");
         if changed {
             for sock in RECEIVING_SOCKETS.lock().drain(..) {
-                sock.ready.store(true, Ordering::Relaxed);
-                sock.waker.wake();
+                sock.notify();
             }
         }
-        //println!("Pump: waiting for rx or tx");
-        //rx = Some(rtl_receive());
-        //tx = Some(wait_for_tx());
-        //});
 
-        //println!("now really waiting");
-        select(rtl_receive(), wait_for_tx()).await;
-        //println!("Something happened {:?}", core::mem::discriminant(&result));
-        //sleep(Duration::from_millis(10)).await;
+        select(wait_for_rx(), wait_for_tx()).await;
     }
 }

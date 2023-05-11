@@ -1,26 +1,24 @@
 use core::time::Duration;
 
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use byteorder::{ByteOrder, NetworkEndian};
-use futures_util::{future::select, StreamExt};
+use futures_util::StreamExt;
 use pc_keyboard::DecodedKey;
 use smoltcp::{
     socket::icmp,
-    time::Instant,
     wire::{Icmpv4Packet, Icmpv4Repr, IpAddress},
 };
-use x86_64::instructions::port::Port;
 
 use crate::{
     backspace,
-    drivers::net::{get_interface, rtl8139::rtl_receive, IcmpSocket},
+    networking::{get_interface, socket::icmp::IcmpSocket},
     print, println,
-    time::{sleep, time_ms, yield_now},
+    time::{sleep, time_ms},
 };
 
-use super::{executor::TaskSpawner, keyboard::KeyStream, network::pump_interfaces};
+use super::keyboard::KeyStream;
 
-pub async fn shell(_spawner: TaskSpawner) {
+pub async fn shell() {
     let mut stream = KeyStream::new();
     let mut buffer = String::new();
 
@@ -105,7 +103,7 @@ async fn ping(remote_addr: IpAddress) {
             data: &echo_payload,
         };
 
-        icmp_socket.send(remote_addr, icmp_repr).await;
+        icmp_socket.send(remote_addr, icmp_repr);
         let (data, _addr) = icmp_socket.recv().await.unwrap();
         let icmp_packet = Icmpv4Packet::new_checked(&data).unwrap();
         let icmp_repr =

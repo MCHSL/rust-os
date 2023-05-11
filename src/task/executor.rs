@@ -1,5 +1,3 @@
-use crate::println;
-
 use super::{Task, TaskId};
 use alloc::task::Wake;
 use alloc::{collections::BTreeMap, sync::Arc};

@@ -1,10 +1,6 @@
-use core::borrow::BorrowMut;
-use core::cell::UnsafeCell;
-
 use crate::gdt;
 use crate::{hlt_loop, println};
 use conquer_once::spin::OnceCell;
-use generic_once_cell::Lazy;
 use pic8259::ChainedPics;
 use spin::Mutex;
 use x86_64::{

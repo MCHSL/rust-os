@@ -54,6 +54,7 @@ impl PciDevice {
         };
 
         let mut base_addresses = [0u32; 6];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..6 {
             base_addresses[i] = pci_read(bus, slot, 0, (0x4 + i) as u8).dword();
         }
