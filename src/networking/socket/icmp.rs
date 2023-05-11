@@ -5,7 +5,7 @@ use smoltcp::phy::DeviceCapabilities;
 use smoltcp::socket::icmp::*;
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, IpAddress};
 
-use crate::networking::wait_for_socket_rx;
+use crate::networking::wait_for_socket_state_change;
 use crate::task::network::notify_tx;
 
 use super::SOCKETS;
@@ -45,7 +45,7 @@ impl IcmpSocket {
             if let Some(res) = res {
                 return res;
             }
-            wait_for_socket_rx().await;
+            wait_for_socket_state_change().await;
         }
     }
 

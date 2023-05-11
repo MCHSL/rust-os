@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use byteorder::{ByteOrder, NetworkEndian};
 use futures_util::StreamExt;
 use pc_keyboard::DecodedKey;
@@ -11,7 +11,10 @@ use smoltcp::{
 
 use crate::{
     backspace,
-    networking::{get_interface, socket::icmp::IcmpSocket},
+    networking::{
+        get_interface,
+        socket::{icmp::IcmpSocket, tcp::TcpSocket},
+    },
     print, println,
     time::{sleep, time_ms},
 };
@@ -75,6 +78,18 @@ pub async fn shell() {
                         None => println!("Missing argument"),
                     };
                 }
+                "send" => {
+                    match input.next() {
+                        Some(addr) => match addr.parse() {
+                            Ok(addr) => {
+                                let text = input.collect::<Vec<&str>>().join(" ");
+                                connect(addr, text).await
+                            }
+                            Err(_) => println!("Invalid address"),
+                        },
+                        None => println!("Missing argument"),
+                    };
+                }
                 _ => {
                     println!("Unrecognized commmand: {}", command)
                 }
@@ -123,4 +138,19 @@ async fn ping(remote_addr: IpAddress) {
             sleep(Duration::from_millis(1000)).await;
         }
     }
+}
+
+async fn connect(remote_addr: IpAddress, text: String) {
+    let mut interface = get_interface(0).unwrap();
+    let mut socket = TcpSocket::new();
+
+    socket
+        .connect(&mut interface, remote_addr, 80)
+        .await
+        .unwrap();
+    socket.send(text.as_bytes()).await.unwrap();
+    let mut buffer = vec![0; 1024];
+    let read = socket.recv(buffer.as_mut_slice()).await.unwrap();
+    let s = String::from_utf8_lossy(&buffer[..read]);
+    println!("{s}");
 }

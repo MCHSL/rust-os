@@ -151,6 +151,11 @@ impl NetworkInterface {
     pub fn capabilities(&self) -> DeviceCapabilities {
         self.inner.lock().device.get_capabilities()
     }
+
+    pub fn with_inner<R>(&mut self, f: impl FnOnce(&mut NetworkInterfaceInner) -> R) -> R {
+        let mut iface = self.inner.lock();
+        f(&mut iface)
+    }
 }
 
 impl From<Arc<Mutex<NetworkInterfaceInner>>> for NetworkInterface {
@@ -159,7 +164,7 @@ impl From<Arc<Mutex<NetworkInterfaceInner>>> for NetworkInterface {
     }
 }
 
-pub fn wait_for_socket_rx() -> NotificationWaiter {
+pub fn wait_for_socket_state_change() -> NotificationWaiter {
     let waiter = Arc::new(NotificationWaiterInner::new());
     RECEIVING_SOCKETS.lock().push(waiter.clone());
     NotificationWaiter { inner: waiter }
