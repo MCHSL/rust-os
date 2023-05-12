@@ -13,7 +13,7 @@ use crate::{
     interrupts::{IDT, PICS},
     networking::EthernetDevice,
     pci, println,
-    task::network::notify_rx,
+    task::network::{notify_rx, notify_tx},
 };
 
 const RST: u8 = 1 << 4; // Reset

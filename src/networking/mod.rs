@@ -8,7 +8,7 @@ use smoltcp::{
 use spin::Mutex;
 
 use crate::drivers::net::rtl8139::Rtl8139;
-use crate::task::network::{NotificationWaiter, NotificationWaiterInner, RECEIVING_SOCKETS};
+use crate::task::network::{NotificationWaiter, NotificationWaiterInner, BLOCKING_SOCKETS};
 use crate::{pci::PciDevice, time};
 
 use self::socket::SOCKETS;
@@ -166,6 +166,6 @@ impl From<Arc<Mutex<NetworkInterfaceInner>>> for NetworkInterface {
 
 pub fn wait_for_socket_state_change() -> NotificationWaiter {
     let waiter = Arc::new(NotificationWaiterInner::new());
-    RECEIVING_SOCKETS.lock().push(waiter.clone());
+    BLOCKING_SOCKETS.lock().push(waiter.clone());
     NotificationWaiter { inner: waiter }
 }

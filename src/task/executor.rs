@@ -4,6 +4,7 @@ use alloc::{collections::BTreeMap, sync::Arc};
 use conquer_once::spin::OnceCell;
 use core::task::{Context, Poll, Waker};
 use crossbeam_queue::ArrayQueue;
+use futures_util::Future;
 
 pub struct Executor {
     tasks: BTreeMap<TaskId, Task>,
@@ -22,14 +23,15 @@ impl TaskSpawner {
         Self { task_queue }
     }
 
-    pub fn spawn(&self, task: Task) {
+    pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        let task = Task::new(task);
         self.task_queue.push(task).expect("Failed to send task");
     }
 }
 
 pub static TASK_SPAWNER: OnceCell<TaskSpawner> = OnceCell::uninit();
 
-pub fn spawn_task(task: Task) {
+pub fn spawn(task: impl Future<Output = ()> + Send + 'static) {
     let spawner = TASK_SPAWNER.get().expect("Executor not created");
     spawner.spawn(task);
 }

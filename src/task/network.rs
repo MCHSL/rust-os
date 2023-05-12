@@ -12,7 +12,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::networking::get_interfaces;
 
-pub static RECEIVING_SOCKETS: Mutex<Vec<Arc<NotificationWaiterInner>>> = Mutex::new(Vec::new());
+pub static BLOCKING_SOCKETS: Mutex<Vec<Arc<NotificationWaiterInner>>> = Mutex::new(Vec::new());
 
 pub static TX_WAKER: OnceCell<Arc<NotificationWaiterInner>> = OnceCell::uninit();
 pub static RX_WAKER: OnceCell<Arc<NotificationWaiterInner>> = OnceCell::uninit();
@@ -96,7 +96,7 @@ pub async fn pump_interfaces() {
         }
 
         if changed {
-            for sock in RECEIVING_SOCKETS.lock().drain(..) {
+            for sock in BLOCKING_SOCKETS.lock().drain(..) {
                 sock.notify();
             }
         }

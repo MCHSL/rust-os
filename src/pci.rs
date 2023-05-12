@@ -33,6 +33,7 @@ pub struct PciDevice {
 
     pub vendor: u16,
     pub id: u16,
+    pub header_type: u8,
 
     pub revision: u8,
     pub prog: u8,
@@ -45,18 +46,20 @@ pub struct PciDevice {
 impl PciDevice {
     fn new(bus: u8, slot: u8, function: u8) -> Self {
         let (id, vendor) = {
-            let data = pci_read(bus, slot, 0, 0);
+            let data = pci_read(bus, slot, function, 0);
             (data.word(1), data.word(0))
         };
         let (class, subclass, prog, revision) = {
-            let data = pci_read(bus, slot, 0, 2);
+            let data = pci_read(bus, slot, function, 2);
             (data.byte(3), data.byte(2), data.byte(1), data.byte(0))
         };
+
+        let header_type = pci_read(bus, slot, function, 3).byte(2);
 
         let mut base_addresses = [0u32; 6];
         #[allow(clippy::needless_range_loop)]
         for i in 0..6 {
-            base_addresses[i] = pci_read(bus, slot, 0, (0x4 + i) as u8).dword();
+            base_addresses[i] = pci_read(bus, slot, function, (0x4 + i) as u8).dword();
         }
 
         Self {
@@ -66,6 +69,7 @@ impl PciDevice {
             id,
             vendor,
             class,
+            header_type,
             subclass,
             revision,
             prog,
@@ -98,8 +102,8 @@ impl fmt::Debug for PciDevice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "PCI {}:{} ID: 0x{:x} Vendor: 0x{:x} Class: {:x}:{:x}",
-            self.bus, self.slot, self.id, self.vendor, self.class, self.subclass
+            "PCI {}:{}:{} ID: 0x{:x} Vendor: 0x{:x} Class: {:x}:{:x}",
+            self.bus, self.slot, self.function, self.id, self.vendor, self.class, self.subclass
         )
     }
 }
@@ -113,20 +117,29 @@ pub fn scan_devices() {
     PCI_DEVICES.init_once(|| Mutex::new(Vec::new()));
     for bus in 0..255 {
         for slot in 0..32 {
-            if let Some(dev) = check_device(bus, slot) {
+            if let Some(dev) = check_device(bus, slot, 0) {
                 println!("PCI device found: {dev:?}");
+                let header = dev.header_type;
                 PCI_DEVICES.get().unwrap().lock().push(dev);
+                if header & 0x80 == 0x80 {
+                    for function in 1..8 {
+                        if let Some(dev) = check_device(bus, slot, function) {
+                            println!("PCI device found: {dev:?}");
+                            PCI_DEVICES.get().unwrap().lock().push(dev);
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-pub fn check_device(bus: u8, slot: u8) -> Option<PciDevice> {
-    let vendor = pci_read(bus, slot, 0, 0).word(1);
+pub fn check_device(bus: u8, slot: u8, function: u8) -> Option<PciDevice> {
+    let vendor = pci_read(bus, slot, function, 0).word(1);
     if vendor == 0xFFFF {
         return None;
     }
-    Some(PciDevice::new(bus, slot, 0))
+    Some(PciDevice::new(bus, slot, function))
 }
 
 fn pci_read(bus: u8, slot: u8, func: u8, register: u8) -> Register {

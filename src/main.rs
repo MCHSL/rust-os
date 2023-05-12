@@ -9,11 +9,14 @@ extern crate alloc;
 use alloc::vec;
 use blog_os::networking::add_interface;
 use blog_os::networking::socket::SOCKETS;
+use blog_os::task::executor::spawn;
 use blog_os::task::network::pump_interfaces;
 use blog_os::task::{executor::Executor, keyboard, shell::shell, Task};
+use blog_os::time::sleep;
 use blog_os::{pci, println};
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
+use core::time::Duration;
 use smoltcp::iface::SocketSet;
 use spin::Mutex;
 
@@ -30,10 +33,15 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     rtl.enable_mastering();
     add_interface(rtl).unwrap();
 
+    let ide = pci::get_device(0x8086, 0x7010).unwrap();
+    println!("Prog IF: {:b}", ide.prog);
+
     SOCKETS.init_once(|| Mutex::new(SocketSet::new(vec![])));
 
     #[cfg(test)]
     test_main();
+
+    //ata
 
     let mut executor = Executor::new();
     executor.spawn(Task::new(keyboard::forward_keys()));

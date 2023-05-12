@@ -13,9 +13,13 @@ use crate::{
     backspace,
     networking::{
         get_interface,
-        socket::{icmp::IcmpSocket, tcp::TcpSocket},
+        socket::{
+            icmp::IcmpSocket,
+            tcp::{TcpListener, TcpStream},
+        },
     },
     print, println,
+    task::executor::spawn,
     time::{sleep, time_ms},
 };
 
@@ -90,6 +94,15 @@ pub async fn shell() {
                         None => println!("Missing argument"),
                     };
                 }
+                "listen" => {
+                    match input.next() {
+                        Some(addr) => match addr.parse() {
+                            Ok(addr) => listen(addr).await,
+                            Err(_) => println!("Invalid address"),
+                        },
+                        None => println!("Missing argument"),
+                    };
+                }
                 _ => {
                     println!("Unrecognized commmand: {}", command)
                 }
@@ -142,7 +155,7 @@ async fn ping(remote_addr: IpAddress) {
 
 async fn connect(remote_addr: IpAddress, text: String) {
     let mut interface = get_interface(0).unwrap();
-    let mut socket = TcpSocket::new();
+    let mut socket = TcpStream::new();
 
     socket
         .connect(&mut interface, remote_addr, 80)
@@ -153,4 +166,24 @@ async fn connect(remote_addr: IpAddress, text: String) {
     let read = socket.recv(buffer.as_mut_slice()).await.unwrap();
     let s = String::from_utf8_lossy(&buffer[..read]);
     println!("{s}");
+}
+
+async fn listen(port: u16) {
+    //let mut interface = get_interface(0).unwrap();
+    let mut listener = TcpListener::new();
+    println!("Listening on {port}");
+    listener.listen(port).unwrap();
+
+    loop {
+        let mut stream = listener.accept().await;
+        println!("New client!");
+        spawn(async move {
+            loop {
+                let mut buffer = vec![0; 1024];
+                let read = stream.recv(buffer.as_mut_slice()).await.unwrap();
+                let s = String::from_utf8_lossy(&buffer[..read]);
+                println!(">{s}");
+            }
+        })
+    }
 }

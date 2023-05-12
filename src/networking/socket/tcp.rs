@@ -2,7 +2,7 @@ use alloc::vec;
 use smoltcp::{
     iface::SocketHandle,
     socket::tcp::{self, Socket},
-    wire::IpAddress,
+    wire::{IpAddress, IpListenEndpoint},
 };
 
 use crate::{
@@ -13,11 +13,11 @@ use crate::{
 
 use super::SOCKETS;
 
-pub struct TcpSocket {
+pub struct TcpStream {
     handle: SocketHandle,
 }
 
-impl TcpSocket {
+impl TcpStream {
     pub fn new() -> Self {
         let rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
         let tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
@@ -77,6 +77,61 @@ impl TcpSocket {
 
             if let Some(res) = res {
                 return res;
+            }
+
+            wait_for_socket_state_change().await;
+        }
+    }
+}
+
+pub struct TcpListener {
+    listener: Option<TcpStream>,
+    endpoint: Option<IpListenEndpoint>,
+}
+
+impl TcpListener {
+    pub fn new() -> Self {
+        Self {
+            listener: None,
+            endpoint: None,
+        }
+    }
+
+    pub fn listen<T: Into<IpListenEndpoint>>(
+        &mut self,
+        endpoint: T,
+    ) -> Result<(), tcp::ListenError> {
+        if self.listener.is_some() {
+            panic!("Allan please add details")
+        }
+        self.endpoint = Some(endpoint.into());
+        self.listen_inner()
+    }
+
+    fn listen_inner(&mut self) -> Result<(), tcp::ListenError> {
+        let mut socket = TcpStream::new();
+        socket.with_inner(|s| s.listen(self.endpoint.unwrap()))?;
+
+        self.listener = Some(socket);
+        notify_tx();
+        Ok(())
+    }
+
+    pub async fn accept(&mut self) -> TcpStream {
+        if self.listener.is_none() {
+            panic!("Allan please add details");
+        }
+        loop {
+            let ready = self
+                .listener
+                .as_mut()
+                .unwrap()
+                .with_inner(|l| l.may_recv() || l.may_send());
+
+            if ready {
+                let stream = self.listener.take().unwrap();
+                self.listen_inner().unwrap();
+                return stream;
             }
 
             wait_for_socket_state_change().await;
